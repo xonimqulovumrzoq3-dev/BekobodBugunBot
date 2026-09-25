@@ -12,9 +12,9 @@ INSTAGRAM_LINK = "https://www.instagram.com/bekobodbugun"
 OFFICIAL_LINKS = (TELEGRAM_LINK, INSTAGRAM_LINK)
 TELEGRAM_FOOTER_LABEL = "Telegram"
 INSTAGRAM_FOOTER_LABEL = "Instagram"
+FOOTER_SEPARATOR = " | "
 TELEGRAM_FOOTER_LINES = (
-    f"📱 {TELEGRAM_FOOTER_LABEL}",
-    f"📸 {INSTAGRAM_FOOTER_LABEL}",
+    f"{TELEGRAM_FOOTER_LABEL}{FOOTER_SEPARATOR}{INSTAGRAM_FOOTER_LABEL}",
 )
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
@@ -33,6 +33,7 @@ _URL_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 _TRAILING_PUNCTUATION = ".,!?;:"
+_FOOTER_DECORATION_CHARS = frozenset(" \t\r\n|:;,.!?()[]{}–—·•")
 
 
 def _canonical_url(value: str) -> str | None:
@@ -73,7 +74,7 @@ class FooterItem:
 
     @property
     def line(self) -> str:
-        return f"{self.icon} {self.label}"
+        return self.label
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +143,15 @@ class SanitizedMessage:
     entities: tuple[MessageEntity, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _FooterLink:
+    start: int
+    end: int
+    canonical: str
+    visible: str
+    is_raw: bool
+
+
 def _url_candidate(match: re.Match[str]) -> str:
     candidate = match.group(0)
     while candidate and candidate[-1] in _TRAILING_PUNCTUATION:
@@ -157,47 +167,333 @@ def _url_ranges(text: str) -> Iterable[tuple[int, int, str]]:
             yield start, start + len(candidate), candidate
 
 
-def _legacy_footer_ranges(
+def _footer_item_target_keys(item: FooterItem) -> set[str]:
+    default_url = (
+        TELEGRAM_LINK
+        if item.label == TELEGRAM_FOOTER_LABEL
+        else INSTAGRAM_LINK
+    )
+    return {
+        canonical
+        for value in (item.url, default_url)
+        if (canonical := _canonical_url(value)) is not None
+    }
+
+
+def _footer_target_keys(
+    footer: FooterConfig,
+    *,
+    labels: set[str] | None = None,
+    include_defaults: bool,
+) -> set[str]:
+    items: tuple[FooterItem, ...] = footer.items()
+    if labels is not None:
+        items = tuple(item for item in items if item.label in labels)
+    keys = {
+        canonical
+        for item in items
+        if (canonical := _canonical_url(item.url)) is not None
+    }
+    if include_defaults:
+        for item in items:
+            keys.update(_footer_item_target_keys(item))
+    return keys
+
+
+def _footer_link_ranges(
     text: str,
+    entities: Sequence[MessageEntity],
+    keys: set[str],
+    start: int,
+    end: int,
+) -> tuple[list[_FooterLink], set[str]]:
+    ranges: list[_FooterLink] = []
+    present: set[str] = set()
+    for range_start, range_end, candidate in _url_ranges(text):
+        if range_end <= start or range_start >= end:
+            continue
+        canonical = _canonical_url(candidate)
+        if canonical in keys:
+            ranges.append(
+                _FooterLink(
+                    max(start, range_start),
+                    min(end, range_end),
+                    canonical,
+                    candidate,
+                    True,
+                )
+            )
+            present.add(canonical)
+    for entity in entities:
+        if entity.type not in _LINK_ENTITY_TYPES:
+            continue
+        target = _entity_target(text, entity)
+        canonical = _canonical_url(target) if target is not None else None
+        if canonical not in keys:
+            continue
+        range_start, range_end = _entity_range(text, entity)
+        if range_end <= start or range_start >= end:
+            continue
+        visible_start = max(start, range_start)
+        visible_end = min(end, range_end)
+        ranges.append(
+            _FooterLink(
+                visible_start,
+                visible_end,
+                canonical,
+                text[visible_start:visible_end],
+                False,
+            )
+        )
+        present.add(canonical)
+    return ranges, present
+
+
+def _footer_marker_intervals(
+    text: str,
+    footer: FooterConfig,
+    start: int,
+    end: int,
+) -> tuple[list[tuple[int, int]], set[str], set[str]]:
+    intervals: list[tuple[int, int]] = []
+    labels: set[str] = set()
+    matched_labels: set[str] = set()
+    url_ranges = [
+        (range_start, range_end)
+        for range_start, range_end, _ in _url_ranges(text)
+        if range_end > start and range_start < end
+    ]
+    for item in footer.items():
+        icon_matches = [
+            match
+            for match in re.finditer(
+                re.escape(item.icon),
+                text[start:end],
+                re.IGNORECASE,
+            )
+            if not any(
+                start + match.start() < range_end
+                and start + match.end() > range_start
+                for range_start, range_end in url_ranges
+            )
+        ] if item.icon else []
+        label_matches = [
+            match
+            for match in re.finditer(
+                rf"(?<!\w){re.escape(item.label)}(?!\w)",
+                text[start:end],
+                re.IGNORECASE,
+            )
+            if not any(
+                start + match.start() < range_end
+                and start + match.end() > range_start
+                for range_start, range_end in url_ranges
+            )
+        ]
+        for match in [*icon_matches, *label_matches]:
+            intervals.append((start + match.start(), start + match.end()))
+        if label_matches:
+            labels.add(item.label)
+        if icon_matches and label_matches:
+            matched_labels.add(item.label)
+    return intervals, labels, matched_labels
+
+
+def _footer_fragment_is_valid(
+    text: str,
+    start: int,
+    end: int,
+    intervals: Sequence[tuple[int, int]],
+) -> bool:
+    cursor = start
+    for interval_start, interval_end in _merge_ranges(intervals):
+        interval_start = max(start, interval_start)
+        interval_end = min(end, interval_end)
+        if interval_end <= interval_start:
+            continue
+        if any(
+            character not in _FOOTER_DECORATION_CHARS
+            for character in text[cursor:interval_start]
+        ):
+            return False
+        cursor = max(cursor, interval_end)
+    return all(
+        character in _FOOTER_DECORATION_CHARS
+        for character in text[cursor:end]
+    )
+
+
+def _footer_link_matches_item(link: _FooterLink, item: FooterItem) -> bool:
+    if link.canonical not in _footer_item_target_keys(item):
+        return False
+    if link.is_raw:
+        return True
+    if _canonical_url(link.visible.strip()) == link.canonical:
+        return True
+
+    intervals: list[tuple[int, int]] = []
+    if item.icon:
+        intervals.extend(
+            (match.start(), match.end())
+            for match in re.finditer(
+                re.escape(item.icon),
+                link.visible,
+                re.IGNORECASE,
+            )
+        )
+    intervals.extend(
+        (match.start(), match.end())
+        for match in re.finditer(
+            rf"(?<!\w){re.escape(item.label)}(?!\w)",
+            link.visible,
+            re.IGNORECASE,
+        )
+    )
+    if not intervals:
+        return False
+
+    cursor = 0
+    for interval_start, interval_end in _merge_ranges(intervals):
+        if any(
+            character not in _FOOTER_DECORATION_CHARS
+            for character in link.visible[cursor:interval_start]
+        ):
+            return False
+        cursor = max(cursor, interval_end)
+    return all(
+        character in _FOOTER_DECORATION_CHARS
+        for character in link.visible[cursor:]
+    )
+
+
+def _line_footer_marker(
+    text: str,
+    entities: Sequence[MessageEntity],
+    footer: FooterConfig,
+    line_start: int,
+    line_end: int,
+) -> int | None:
+    marker_intervals, labels, matched_labels = _footer_marker_intervals(
+        text,
+        footer,
+        line_start,
+        line_end,
+    )
+    target_keys = _footer_target_keys(
+        footer,
+        labels=labels or None,
+        include_defaults=bool(labels),
+    )
+    link_records, present = _footer_link_ranges(
+        text,
+        entities,
+        target_keys,
+        line_start,
+        line_end,
+    )
+    link_ranges = [(link.start, link.end) for link in link_records]
+    if not marker_intervals:
+        if len(present) < 2:
+            return None
+        if not all(
+            link.is_raw or _canonical_url(link.visible.strip()) == link.canonical
+            for link in link_records
+        ):
+            return None
+        if not _footer_fragment_is_valid(text, line_start, line_end, link_ranges):
+            return None
+        return line_start
+
+    if not labels or not link_ranges:
+        return None
+    if not all(
+        any(
+            _footer_link_matches_item(link, item)
+            for item in footer.items()
+        )
+        for link in link_records
+    ):
+        return None
+    for item in footer.items():
+        if item.label not in labels:
+            continue
+        if not any(
+            _footer_link_matches_item(link, item)
+            for link in link_records
+        ):
+            return None
+    if len(labels) > 1 and len(present) < 2:
+        return None
+    if len(present) < 2 and not matched_labels:
+        return None
+    intervals = _merge_ranges([*marker_intervals, *link_ranges])
+    marker = min(interval_start for interval_start, _ in intervals)
+    if not _footer_fragment_is_valid(text, marker, line_end, intervals):
+        return None
+    if any(
+        character not in _FOOTER_DECORATION_CHARS
+        for character in text[line_start:marker]
+    ):
+        return None
+    return marker
+
+
+def _footer_ranges(
+    text: str,
+    entities: Sequence[MessageEntity],
     footer: FooterConfig,
 ) -> list[tuple[int, int]]:
     lines = text.splitlines(keepends=True)
+    if not lines:
+        return []
+
+    records: list[tuple[int, int, int]] = []
     offset = 0
-    records = []
     for line in lines:
         end = offset + len(line)
-        records.append((offset, end, line.rstrip("\r\n")))
+        content_end = offset + len(line.rstrip("\r\n"))
+        records.append((offset, end, content_end))
         offset = end
 
-    ranges: list[tuple[int, int]] = []
-    for start, end, line in reversed(records):
-        if not line.strip():
-            continue
-        matched = False
-        for item in footer.items():
-            prefix = f"{item.icon} {item.label}:"
-            candidate = line.strip()
-            if not candidate.startswith(prefix):
-                continue
-            candidate_url = candidate[len(prefix) :].strip()
-            candidate_key = _canonical_url(candidate_url)
-            configured_key = _canonical_url(item.url)
-            default_key = _canonical_url(
-                TELEGRAM_LINK
-                if item.label == TELEGRAM_FOOTER_LABEL
-                else INSTAGRAM_LINK
-            )
-            if candidate_key is not None and candidate_key in {
-                configured_key,
-                default_key,
-            }:
-                matched = True
-                break
-        if not matched:
+    matches: dict[int, int] = {}
+    for index, (start, end, content_end) in enumerate(records):
+        marker = _line_footer_marker(
+            text,
+            entities,
+            footer,
+            start,
+            content_end,
+        )
+        if marker is not None:
+            matches[index] = marker
+
+    last_content = next(
+        (
+            index
+            for index in range(len(records) - 1, -1, -1)
+            if text[records[index][0] : records[index][2]].strip()
+        ),
+        None,
+    )
+    if last_content is None or last_content not in matches:
+        return []
+
+    selected: list[tuple[int, int]] = []
+    index = last_content
+    while index >= 0:
+        start, _, _ = records[index]
+        if index in matches:
+            selected.append((index, matches[index]))
+        elif text[start : records[index][2]].strip():
             break
-        ranges.append((start, end))
-    ranges.reverse()
-    return ranges
+        index -= 1
+    selected.reverse()
+    if not selected:
+        return []
+
+    first_index, _ = selected[0]
+    first_start, _, _ = records[first_index]
+    return [(first_start, len(text))]
 
 
 # Telegram entity offsets and lengths are measured in UTF-16 code units.
@@ -383,6 +679,17 @@ def _official_link_keys(
     return present
 
 
+def _footer_separator(body: str) -> str:
+    if not body or re.search(r"(?:\r\n|\r|\n){2}$", body):
+        return ""
+    if body.endswith(("\r\n", "\n")):
+        return "\n" if body.endswith("\n") and not body.endswith("\r\n") else "\r\n"
+    if body.endswith("\r"):
+        return "\r"
+    line_ending = re.search(r"\r\n|\r|\n", body)
+    return (line_ending.group(0) if line_ending else "\n") * 2
+
+
 def _footer_text_and_entities(
     body: str,
     entities: Sequence[MessageEntity],
@@ -391,21 +698,15 @@ def _footer_text_and_entities(
     if not missing_items:
         return body, tuple(entities)
 
-    if not body or body.endswith("\n\n"):
-        separator = ""
-    elif body.endswith("\n"):
-        separator = "\n"
-    else:
-        separator = "\n\n"
+    separator = _footer_separator(body)
 
-    footer = "\n".join(item.line for item in missing_items)
+    footer = FOOTER_SEPARATOR.join(item.label for item in missing_items)
     combined = f"{body}{separator}{footer}"
     combined_entities = list(entities)
     footer_start = len(body) + len(separator)
     footer_cursor = footer_start
-    for item in missing_items:
-        line = item.line
-        label_start = footer_cursor + line.index(item.label)
+    for index, item in enumerate(missing_items):
+        label_start = footer_cursor
         combined_entities.append(
             MessageEntity(
                 type="text_link",
@@ -414,7 +715,9 @@ def _footer_text_and_entities(
                 url=item.url,
             )
         )
-        footer_cursor += len(line) + 1
+        footer_cursor += len(item.label)
+        if index < len(missing_items) - 1:
+            footer_cursor += len(FOOTER_SEPARATOR)
     return combined, tuple(combined_entities)
 
 
@@ -457,7 +760,7 @@ def sanitize_message(
     footer: FooterConfig | None = None,
 ) -> SanitizedMessage:
     footer_config = footer or FooterConfig()
-    removal_ranges = _legacy_footer_ranges(text, footer_config)
+    removal_ranges = _footer_ranges(text, entities, footer_config)
     removal_ranges.extend(
         (start, end)
         for start, end, candidate in _url_ranges(text)
@@ -512,6 +815,7 @@ def sanitize_message(
 
 
 __all__ = [
+    "FOOTER_SEPARATOR",
     "INSTAGRAM_LINK",
     "OFFICIAL_LINKS",
     "TELEGRAM_CAPTION_LIMIT",

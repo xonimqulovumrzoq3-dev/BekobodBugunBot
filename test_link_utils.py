@@ -5,6 +5,7 @@ import unittest
 from telegram import MessageEntity
 
 from link_utils import (
+    FOOTER_SEPARATOR,
     INSTAGRAM_LINK,
     TELEGRAM_FOOTER_LINES,
     TELEGRAM_LINK,
@@ -204,12 +205,215 @@ class LinkSanitizerTests(unittest.TestCase):
             LinkPolicy(removable_domains=frozenset({"t.me", "instagram.com"})),
         )
 
-        self.assertEqual(result.text, "Body\n\n📱 Telegram\n📸 Instagram")
+        self.assertEqual(result.text, f"Body\n\n{TELEGRAM_FOOTER_LINES[0]}")
         self.assertNotIn(TELEGRAM_LINK, result.text)
         self.assertNotIn(INSTAGRAM_LINK, result.text)
         self.assertEqual(
             [_entity_text(result.text, entity) for entity in _footer_entities(result)],
             ["Telegram", "Instagram"],
+        )
+
+    def test_preserves_unrelated_emoji_and_pipe_in_body(self) -> None:
+        result = sanitize_message("Body 😀 | stays", (), LinkPolicy())
+
+        self.assertEqual(
+            result.text,
+            f"Body 😀 | stays\n\n{TELEGRAM_FOOTER_LINES[0]}",
+        )
+
+    def test_preserves_line_break_style_when_replacing_footer(self) -> None:
+        result = sanitize_message(
+            "Body\r\n\r\n"
+            f"📱 Telegram: {TELEGRAM_LINK}\r\n"
+            f"📸 Instagram: {INSTAGRAM_LINK}",
+            (),
+            LinkPolicy(),
+        )
+
+        self.assertEqual(
+            result.text,
+            f"Body\r\n\r\n{TELEGRAM_FOOTER_LINES[0]}",
+        )
+
+    def test_uses_existing_line_break_style_for_new_footer(self) -> None:
+        result = sanitize_message("Body\r\nMore", (), LinkPolicy())
+
+        self.assertEqual(
+            result.text,
+            f"Body\r\nMore\r\n\r\n{TELEGRAM_FOOTER_LINES[0]}",
+        )
+
+    def test_removes_footer_only_raw_links(self) -> None:
+        result = sanitize_message(
+            f"{TELEGRAM_LINK} | {INSTAGRAM_LINK}",
+            (),
+            LinkPolicy(),
+        )
+
+        self.assertEqual(result.text, TELEGRAM_FOOTER_LINES[0])
+        self.assertEqual(
+            [_entity_text(result.text, entity) for entity in _footer_entities(result)],
+            ["Telegram", "Instagram"],
+        )
+
+    def test_keeps_unlinked_footer_like_body_text(self) -> None:
+        text = "Facts\nTelegram | Instagram"
+
+        result = sanitize_message(text, (), LinkPolicy())
+
+        self.assertTrue(result.text.startswith(text))
+
+    def test_keeps_cross_wired_footer_like_content(self) -> None:
+        text = f"📸 Instagram: {TELEGRAM_LINK}"
+
+        result = sanitize_message(text, (), LinkPolicy())
+
+        self.assertIn(text, result.text)
+
+    def test_keeps_cross_wired_targets_in_footer_like_line(self) -> None:
+        footer = FooterConfig(
+            telegram_url="https://t.me/custom",
+            instagram_url="https://www.instagram.com/custom",
+        )
+        text = (
+            f"📱 Telegram: {TELEGRAM_LINK} | "
+            f"📸 Instagram: {footer.telegram_url}"
+        )
+
+        result = sanitize_message(text, (), LinkPolicy(), footer=footer)
+
+        self.assertIn(text, result.text)
+
+    def test_keeps_malformed_label_entity_as_body_content(self) -> None:
+        text = "📱 TelegramBot"
+        entity = MessageEntity(
+            type="text_link",
+            offset=_utf16_offset(text, text.index("TelegramBot")),
+            length=len("TelegramBot"),
+            url=TELEGRAM_LINK,
+        )
+
+        result = sanitize_message(text, (entity,), LinkPolicy())
+
+        self.assertIn(text, result.text)
+        self.assertTrue(
+            any(
+                item.type == "text_link" and item.url == TELEGRAM_LINK
+                for item in result.entities
+            )
+        )
+
+    def test_keeps_unrelated_official_text_link_as_body_content(self) -> None:
+        text = "Home | Channel"
+        entities = (
+            MessageEntity(
+                type="text_link",
+                offset=0,
+                length=len("Home"),
+                url=TELEGRAM_LINK,
+            ),
+            MessageEntity(
+                type="text_link",
+                offset=len("Home | "),
+                length=len("Channel"),
+                url=INSTAGRAM_LINK,
+            ),
+        )
+
+        result = sanitize_message(text, entities, LinkPolicy())
+
+        self.assertTrue(result.text.startswith(text))
+        self.assertEqual(
+            [entity.to_dict() for entity in result.entities],
+            [entity.to_dict() for entity in entities],
+        )
+
+    def test_keeps_unmatched_icon_link_as_body_content(self) -> None:
+        text = "📱 Home"
+        entity = MessageEntity(
+            type="text_link",
+            offset=_utf16_offset(text, text.index("Home")),
+            length=len("Home"),
+            url=TELEGRAM_LINK,
+        )
+
+        result = sanitize_message(text, (entity,), LinkPolicy())
+
+        self.assertIn("📱 Home", result.text)
+        self.assertTrue(
+            any(
+                item.type == "text_link" and item.url == TELEGRAM_LINK
+                for item in result.entities
+            )
+        )
+
+    def test_keeps_single_official_target_as_body_content(self) -> None:
+        result = sanitize_message(
+            f"Post\n{TELEGRAM_LINK}",
+            (),
+            LinkPolicy(),
+        )
+
+        self.assertIn(TELEGRAM_LINK, result.text)
+        self.assertIn("Post", result.text)
+
+    def test_keeps_hidden_single_target_as_body_content(self) -> None:
+        text = "Home"
+        entity = MessageEntity(
+            type="text_link",
+            offset=0,
+            length=len(text),
+            url=TELEGRAM_LINK,
+        )
+
+        result = sanitize_message(text, (entity,), LinkPolicy())
+
+        self.assertIn("Home", result.text)
+        self.assertTrue(
+            any(
+                item.type == "text_link" and item.url == TELEGRAM_LINK
+                for item in result.entities
+            )
+        )
+
+    def test_keeps_default_target_raw_line_with_custom_footer(self) -> None:
+        result = sanitize_message(
+            f"Post\n{TELEGRAM_LINK}",
+            (),
+            LinkPolicy(),
+            footer=FooterConfig(
+                telegram_url="https://t.me/custom",
+                instagram_url="https://www.instagram.com/custom",
+            ),
+        )
+
+        self.assertIn(TELEGRAM_LINK, result.text)
+        self.assertIn("Post", result.text)
+
+    def test_processed_footer_is_idempotent(self) -> None:
+        text = f"Body\n\n{TELEGRAM_FOOTER_LINES[0]}"
+        entities = (
+            MessageEntity(
+                type="text_link",
+                offset=_utf16_offset(text, text.index("Telegram")),
+                length=len("Telegram"),
+                url=TELEGRAM_LINK,
+            ),
+            MessageEntity(
+                type="text_link",
+                offset=_utf16_offset(text, text.index("Instagram")),
+                length=len("Instagram"),
+                url=INSTAGRAM_LINK,
+            ),
+        )
+
+        result = sanitize_message(text, entities, LinkPolicy())
+        repeated = sanitize_message(result.text, result.entities, LinkPolicy())
+
+        self.assertEqual(repeated.text, result.text)
+        self.assertEqual(
+            [entity.to_dict() for entity in repeated.entities],
+            [entity.to_dict() for entity in result.entities],
         )
 
     def test_does_not_duplicate_existing_official_targets(self) -> None:
@@ -239,7 +443,7 @@ class LinkSanitizerTests(unittest.TestCase):
 
         result = sanitize_message(text, entities, LinkPolicy())
 
-        self.assertEqual(result.text, text)
+        self.assertEqual(result.text, f"Hello\n\n{TELEGRAM_FOOTER_LINES[0]}")
         self.assertEqual(len(_footer_entities(result)), 2)
 
     def test_adds_only_missing_official_footer_line(self) -> None:
@@ -251,8 +455,8 @@ class LinkSanitizerTests(unittest.TestCase):
 
         self.assertEqual(result.text.count(TELEGRAM_LINK), 1)
         self.assertNotIn(INSTAGRAM_LINK, result.text)
-        self.assertIn(TELEGRAM_FOOTER_LINES[1], result.text)
-        self.assertNotIn(TELEGRAM_FOOTER_LINES[0], result.text)
+        self.assertIn("Instagram", result.text)
+        self.assertNotIn(FOOTER_SEPARATOR, result.text)
         self.assertEqual(len(_footer_entities(result)), 1)
         self.assertEqual(_footer_entities(result)[0].url, INSTAGRAM_LINK)
 
@@ -261,7 +465,7 @@ class LinkSanitizerTests(unittest.TestCase):
 
         self.assertEqual(
             result.text,
-            f"Hello\n\n{TELEGRAM_FOOTER_LINES[0]}\n{TELEGRAM_FOOTER_LINES[1]}",
+            f"Hello\n\n{TELEGRAM_FOOTER_LINES[0]}",
         )
         self.assertNotIn(TELEGRAM_LINK, result.text)
         self.assertNotIn(INSTAGRAM_LINK, result.text)

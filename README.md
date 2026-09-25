@@ -3,8 +3,7 @@
 A Python Telegram bot that requires both an allowlisted Telegram user ID and a password, publishes authorized users' private posts to one configured channel, removes configured Telegram/website/social-media links, and adds a compact official footer:
 
 ```text
-📱 Telegram
-📸 Instagram
+Telegram | Instagram
 ```
 
 The words `Telegram` and `Instagram` are clickable Telegram `text_link` entities. Their destinations are configurable and are not displayed in the message text.
@@ -114,11 +113,10 @@ For private submissions, the sender ID and password are checked before link sani
 For example, with the default values the visible footer is:
 
 ```text
-📱 Telegram
-📸 Instagram
+Telegram | Instagram
 ```
 
-The displayed `Telegram` label is a `text_link` entity targeting `https://t.me/bekobodbugun`; the displayed `Instagram` label targets `https://www.instagram.com/bekobodbugun`. The URLs are not included in the message text.
+The displayed `Telegram` label is a `text_link` entity targeting `https://t.me/bekobodbugun`; the displayed `Instagram` label targets `https://www.instagram.com/bekobodbugun`. The separator is visible text, while the URLs are not included in the message text.
 
 ## Link removal configuration
 
@@ -137,7 +135,7 @@ REMOVABLE_DOMAINS=
 REMOVABLE_LINKS=https://t.me/old_channel,https://www.instagram.com/old_account
 ```
 
-If a configured footer target already occurs in a post as a raw URL or `text_link` entity, the bot does not add a duplicate footer line. If only one target is present, only the missing label is appended. A legacy raw-URL footer at the end of an edited post is converted to the new clickable-label format.
+If a configured footer target already occurs in a post as a raw URL or `text_link` entity, the bot does not add a duplicate footer item. If only one target is present, only the missing label is appended. A legacy raw-URL or processed footer at the end of an edited post is converted to the new single-line clickable-label format.
 
 ## Channel permissions
 

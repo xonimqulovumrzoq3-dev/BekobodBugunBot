@@ -138,7 +138,7 @@ class BotMediaTests(unittest.TestCase):
         assert edit_call is not None
         caption = edit_call.args[0]
         self.assertTrue(caption.startswith("Photo caption"))
-        self.assertIn("📱 Telegram", caption)
+        self.assertIn("Telegram | Instagram", caption)
 
     def test_unauthorized_user_is_rejected_before_processing(self) -> None:
         message = FakeMessage(
@@ -277,7 +277,7 @@ class BotMediaTests(unittest.TestCase):
         assert copy_call is not None
         self.assertEqual(copy_call.kwargs["chat_id"], "@channel")
         self.assertTrue(copy_call.kwargs["caption"].startswith("Photo caption"))
-        self.assertIn("📱 Telegram", copy_call.kwargs["caption"])
+        self.assertIn("Telegram | Instagram", copy_call.kwargs["caption"])
         self.bot.send_message.assert_not_awaited()
         message.reply_text.assert_awaited_once_with(
             "Published to the configured channel."
@@ -292,7 +292,7 @@ class BotMediaTests(unittest.TestCase):
         copy_call = message.copy.await_args
         assert copy_call is not None
         self.assertEqual(copy_call.kwargs["chat_id"], "@channel")
-        self.assertIn("📱 Telegram", copy_call.kwargs["caption"])
+        self.assertIn("Telegram | Instagram", copy_call.kwargs["caption"])
 
     def test_private_text_is_sent_to_configured_channel(self) -> None:
         message = FakeMessage(caption=None, text="Post text", has_media=False)
@@ -306,7 +306,7 @@ class BotMediaTests(unittest.TestCase):
         assert send_call is not None
         self.assertEqual(send_call.kwargs["chat_id"], "@channel")
         self.assertTrue(send_call.kwargs["text"].startswith("Post text"))
-        self.assertIn("📱 Telegram", send_call.kwargs["text"])
+        self.assertIn("Telegram | Instagram", send_call.kwargs["text"])
         message.reply_text.assert_awaited_once_with(
             "Published to the configured channel."
         )
@@ -330,7 +330,7 @@ class BotMediaTests(unittest.TestCase):
         edit_call = message.edit_caption.await_args
         self.assertIsNotNone(edit_call)
         assert edit_call is not None
-        self.assertIn("📱 Telegram", edit_call.args[0])
+        self.assertIn("Telegram | Instagram", edit_call.args[0])
 
 
 if __name__ == "__main__":
