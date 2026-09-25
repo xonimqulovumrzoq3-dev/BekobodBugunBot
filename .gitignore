@@ -1,0 +1,9 @@
+.env
+*.sqlite3
+*.sqlite
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
